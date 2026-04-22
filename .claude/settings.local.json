@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile csv_storage.py sync_data.py analyze.py scheduler.py indicator_calculator.py data_resampler.py market_judgment.py signal_generator.py)",
+      "Bash(python -m pytest test_csv_storage.py -v --tb=short)",
+      "Bash(python -m pytest test_indicator_calculator.py -v --tb=short)",
+      "Bash(python -m pytest test_indicator_calculator.py -v)",
+      "Bash(python -m pytest test_market_judgment.py -v)",
+      "Bash(python -m pytest test_csv_storage.py test_indicator_calculator.py test_market_judgment.py -v --cov=../scripts --cov-report=term-missing)",
+      "Bash(python -m pytest test_resampler_and_signal.py -v)",
+      "Bash(python -m pytest -v --cov=../scripts --cov-report=term-missing)",
+      "Bash(python -m pytest test_analyze_enhanced.py -v --tb=short)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(git *)",
+      "Bash(set DATA_SOURCE=local)",
+      "Bash(pip show *)"
+    ]
+  }
+}

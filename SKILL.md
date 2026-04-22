@@ -1,9 +1,3 @@
----
-name: market_researcher
-description: 市场观察员 - 获取加密货币市场 OHLCV 数据，计算技术指标，输出市场趋势分析
-version: 1.0.0
----
-
 # Market Researcher Skill - 市场观察员
 
 用于获取加密货币市场 OHLCV 数据，计算技术指标，并输出市场趋势性判断。
@@ -12,13 +6,13 @@ version: 1.0.0
 
 **1. 安装依赖**
 ```bash
-cd market_researcher
+cd market_research_skill
 pip install -r requirements.txt
 ```
 
 **2. 配置环境变量**
 ```bash
-cp .env.example .env
+cp .env.sample .env
 # 编辑 .env 文件，配置数据源
 ```
 
@@ -34,29 +28,45 @@ python scripts/scheduler.py
 ## 核心功能
 
 1. **多时间周期数据获取** - 支持 15m, 1h, 4h, 1d OHLCV 数据
-2. **技术指标计算** - RSI, MACD, Bollinger Bands, ATR, Volatility 等
+2. **技术指标计算** - RSI, MACD, Bollinger Bands, ATR, Volatility, ADX, +DI, -DI
 3. **市场趋势判断** - 趋势市场/震荡市场，牛市/熊市/震荡
 4. **Top 10 交易对分析** - 按成交量排序的主流币种
-5. **数据源配置** - 支持 zkware (sync_market_data_skill) 或 Binance API
-6. **自动告警** - 数据缺失时发送企业微信告警
+5. **数据源配置** - 支持 local (本地文件) 或 Binance API
+6. **自动告警** - 数据缺失时发送企业微信告警 (local 源)
+7. **每日文件分割** - 数据按日期分割存储，便于管理和回溯
 
 ## 数据源配置
 
-### 方式一：zkware 数据源
+### 方式一：local 数据源
 
-使用 `sync_market_data_skill` 同步的数据，每 15 分钟更新一次。
+使用本地目录数据文件，数据由外部同步工具提供。
 
 **环境变量配置：**
 ```bash
-DATA_SOURCE=zkware
-MARKET_RESEARCHER_DATA_PATH=/path/to/market_researcher/data
+DATA_SOURCE=local
+MARKET_RESEARCHER_DATA_PATH=D:/workspace/shared_data/binance/futures/um/daily/data
 WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 ```
 
+**数据存储格式：**
+```
+{data_path}/
+├── BTCUSDT/
+│   ├── 1h/
+│   │   ├── BTCUSDT-1h-2026-04-21.csv
+│   │   └── BTCUSDT-1h-2026-04-22.csv
+│   ├── 4h/
+│   │   └── BTCUSDT-4h-2026-04-21.csv
+│   └── 1d/
+│       └── BTCUSDT-1d-2026-04-21.csv
+├── ETHUSDT/
+│   └── ...
+```
+
 **特点：**
-- 数据由 `sync_market_data_skill` 提供
-- 每 15 分钟同步一次
+- 数据按日期分割存储：`{symbol}-{timeframe}-{YYYY}-{MM}-{DD}.csv`
 - 数据缺失时发送告警，不自动补充
+- 适合与外部数据同步工具配合使用
 
 ### 方式二：Binance 数据源
 
@@ -66,8 +76,7 @@ WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 ```bash
 DATA_SOURCE=binance
 BINANCE_API_BASE=https://api.binance.com
-MARKET_RESEARCHER_DATA_PATH=/path/to/market_researcher/data
-WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
+MARKET_RESEARCHER_DATA_PATH=D:/workspace/shared_data/binance/futures/um/daily/data
 ```
 
 **特点：**
@@ -86,7 +95,8 @@ WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 | Bollinger Bands | 布林带，波动率和趋势 | 1d, 4h, 1h, 15m, 5m, 1m |
 | ATR | 平均真实波幅，波动率 | 1d, 4h, 1h, 15m, 5m, 1m |
 | Volatility | 波动率 | 1d, 4h, 1h, 15m, 5m, 1m |
-| MA | 移动平均线 (MA20, MA50, MA200) | 1d, 4h, 1h, 15m |
+| ADX | 平均趋向指标，趋势强度 | 1d, 4h, 1h, 15m, 5m, 1m |
+| +DI / -DI | 趋向指标，方向判断 | 1d, 4h, 1h, 15m, 5m, 1m |
 
 ### 市场判断逻辑
 
@@ -103,6 +113,8 @@ WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 
 ### 输出频率
 
+根据 soul.md 定义：
+
 | 时间 | 输出内容 |
 |------|---------|
 | 每小时整点 | Top 10 交易对 1h 技术指标分析 |
@@ -115,33 +127,52 @@ WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 # 编辑 crontab
 crontab -e
 
-# 添加以下配置
-*/15 * * * * cd /path/to/market_researcher && python scripts/sync_data.py >> logs/sync.log 2>&1
-0 * * * * cd /path/to/market_researcher && python scripts/scheduler.py 1h >> logs/analysis_1h.log 2>&1
-0 */4 * * * cd /path/to/market_researcher && python scripts/scheduler.py 4h >> logs/analysis_4h.log 2>&1
-0 0 * * * cd /path/to/market_researcher && python scripts/scheduler.py 1d >> logs/analysis_1d.log 2>&1
+# 添加以下配置（单一入口推荐）
+*/15 * * * * cd /path/to/market_research_skill && python scripts/scheduler.py >> logs/scheduler.log 2>&1
+```
+
+或者分开配置：
+
+```bash
+# 数据同步（每 15 分钟）
+*/15 * * * * python scripts/sync_data.py
+
+# 1h 分析（每小时整点）
+0 * * * * python scripts/analyze.py 1h
+
+# 4h 分析（每 4 小时整点）
+0 */4 * * * python scripts/analyze.py 4h
+
+# 1d 分析（每天 0 点）
+0 0 * * * python scripts/analyze.py 1d
 ```
 
 ## 输出目录结构
 
 ```
-market_researcher/
-├── data/
+market_research_skill/
+├── data/ 或 workspace/shared_data/binance/futures/um/daily/data/
 │   └── {symbol}/           # 每个交易对一个目录
-│       ├── 15m.csv         # 15 分钟 K 线
-│       ├── 1h.csv          # 1 小时 K 线
-│       ├── 4h.csv          # 4 小时 K 线
-│       └── 1d.csv          # 日线 K 线
+│       ├── 1h/             # 时间周期目录
+│       │   ├── {symbol}-1h-2026-04-21.csv  # 每日文件
+│       │   └── {symbol}-1h-2026-04-22.csv
+│       ├── 4h/
+│       └── 1d/
 ├── output/
 │   ├── 1h_analysis/        # 1 小时分析报告
 │   ├── 4h_analysis/        # 4 小时分析报告
 │   └── 1d_analysis/        # 日线分析报告
 ├── logs/                   # 日志目录
 ├── scripts/
-│   ├── sync_data.py        # 数据同步脚本
-│   ├── analyze.py          # 技术分析脚本
-│   └── scheduler.py        # 定时任务调度
-├── .env.example            # 环境变量模板
+│   ├── sync_data.py        # 数据同步
+│   ├── analyze.py          # 技术分析
+│   ├── scheduler.py        # 定时任务调度
+│   ├── csv_storage.py      # CSV 存储管理
+│   ├── data_resampler.py   # 数据重采样
+│   ├── indicator_calculator.py  # 指标计算
+│   ├── market_judgment.py  # 市场状态判断
+│   └── signal_generator.py # 信号生成
+├── .env.sample             # 环境变量模板
 └── requirements.txt        # Python 依赖
 ```
 
@@ -164,14 +195,14 @@ timestamp,open,high,low,close,volume
 ### 1 小时分析报告示例
 
 ```markdown
-# 市场技术分析 - 1h (2026-04-20 14:00)
+# 市场技术分析 - 1h (2026-04-22 14:00)
 
 ## Top 10 交易对
 
-| 排名 | 交易对 | RSI | MACD | BB | ATR | 趋势判断 |
-|------|--------|-----|------|----|-----|---------|
-| 1 | BTCUSDT | 55.2 |  bullish | 中轨 | 2.3% | 震荡偏多 |
-| 2 | ETHUSDT | 62.1 |  bullish | 上轨 | 3.1% | 强势 |
+| 排名 | 交易对 | 价格 | 24h 涨跌 | RSI | MACD | 布林带 | ATR | 波动率 | 趋势判断 |
+|------|--------|------|---------|-----|------|--------|-----|--------|---------|
+| 1 | BTCUSDT | 65200.00 | +1.23% | 55.2 | bullish | 中轨 | 2.3% | 偏多 |
+| 2 | ETHUSDT | 3500.00 | +2.15% | 62.1 | bullish | 上轨 | 3.1% | 强势 |
 | ... |
 
 ## 市场整体判断
@@ -184,15 +215,17 @@ timestamp,open,high,low,close,volume
 
 ### 数据缺失告警
 
-当数据源缺失时，发送企业微信告警：
+当数据源缺失时（local 模式），发送企业微信告警：
 
-```json
-{
-  "msgtype": "markdown",
-  "markdown": {
-    "content": "## 市场数据缺失告警\n\n- 交易对：BTCUSDT\n- 时间周期：1h\n- 缺失时间：2026-04-20 14:00\n- 数据源：zkware"
-  }
-}
+```markdown
+## 市场数据缺失告警
+
+- 交易对：BTCUSDT
+- 时间周期：1h
+- 缺失时间：2026-04-22 14:00
+- 数据源：local
+
+请检查数据是否已同步到指定目录。
 ```
 
 ### API 错误处理
@@ -204,49 +237,41 @@ timestamp,open,high,low,close,volume
 ## 依赖安装
 
 ```bash
-cd market_researcher
+cd market_research_skill
 pip install -r requirements.txt
 ```
 
 ### requirements.txt
 
 ```
-pandas
-numpy
-ta-lib
-requests
-python-dotenv
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.31.0
+python-dotenv>=1.0.0
 ```
 
 ## 命令列表
 
-### /market-sync
+### 同步数据
 
-同步最新市场数据。
-
-**执行：**
 ```bash
 python scripts/sync_data.py
 ```
 
-### /market-analyze [interval]
+### 执行技术分析
 
-执行技术分析，支持 1h, 4h, 1d。
-
-**执行：**
 ```bash
-python scripts/analyze.py 1h
-python scripts/analyze.py 4h
-python scripts/analyze.py 1d
+python scripts/analyze_enhanced.py 1h BTCUSDT  # 1 小时分析 BTCUSDT
+python scripts/analyze_enhanced.py 4h   # 4 小时分析 top 交易币对
+python scripts/analyze_enhanced.py 1d   # 日线分析 top 交易币对
 ```
 
-### /market-top10 [interval]
+### 定时调度
 
-获取 Top 10 交易对的技术分析。
-
-**执行：**
 ```bash
-python scripts/scheduler.py 1h
+python scripts/scheduler.py      # 自动模式
+python scripts/scheduler.py 1h   # 指定 1h 分析
+python scripts/scheduler.py sync # 仅同步数据
 ```
 
 ## 配置说明
@@ -256,16 +281,16 @@ python scripts/scheduler.py 1h
 在 skill 目录创建 `.env` 文件：
 
 ```bash
-cp .env.example .env
+cp .env.sample .env
 ```
 
 **必需配置：**
 ```bash
-# 数据源：zkware 或 binance
+# 数据源：local 或 binance
 DATA_SOURCE=binance
 
 # 数据保存路径
-MARKET_RESEARCHER_DATA_PATH=/home/caiqingfeng/.openclaw/workspace/market_researcher/data
+MARKET_RESEARCHER_DATA_PATH=D:/workspace/shared_data/binance/futures/um/daily/data
 
 # 企业微信告警 Webhook（可选）
 WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
@@ -289,39 +314,36 @@ BB_STD=2
 ATR_PERIOD=14
 ```
 
-## 示例用法
+## 模块化组件
 
-### 手动同步数据
-```bash
-python scripts/sync_data.py
-```
+### CsvStorage
+CSV 存储管理，支持按日期分割的文件读写。
 
-### 执行 1 小时分析
-```bash
-python scripts/scheduler.py 1h
-```
+### DataResampler
+数据重采样，将 1m K 线数据 resample 到 5m/15m/1h/4h/1d 多周期。
 
-### 执行 4 小时分析
-```bash
-python scripts/scheduler.py 4h
-```
+### IndicatorCalculator
+指标计算，支持 TA-Lib 或纯 Python 实现计算 ADX、MACD、RSI 等指标。
 
-### 执行日线分析
-```bash
-python scripts/scheduler.py 1d
-```
+### MarketJudgment
+市场状态判断，根据多周期指标一致性判断市场类型和方向。
+
+### SignalGenerator
+信号生成，合并所有周期的指标到一行，生成最终的信号 DF。
 
 ## 注意事项
 
-1. **数据源选择** - zkware 数据源需要确保 `sync_market_data_skill` 正常运行
+1. **数据源选择** - local 数据源需要确保外部数据同步工具正常运行
 2. **API 限流** - Binance 公开接口有速率限制，避免过于频繁的请求
 3. **时间同步** - 确保系统时间准确，定时任务基于整点执行
-4. **数据存储** - K 线数据按交易对和时间周期分别存储，便于回溯
+4. **数据存储** - K 线数据按交易对、时间周期、日期分别存储，便于回溯
 5. **告警配置** - 建议配置企业微信告警，及时发现数据缺失问题
 
 ## 参考资料
 
-- `soul.md.md` - 市场观察员人格定义
-- `scripts/sync_data.py` - 数据同步实现
-- `scripts/analyze.py` - 技术分析实现
-- `scripts/scheduler.py` - 定时任务调度
+- soul.md - 市场观察员人格定义
+- scripts/csv_storage.py - CSV 存储管理实现
+- scripts/data_resampler.py - 数据重采样实现
+- scripts/indicator_calculator.py - 指标计算实现
+- scripts/market_judgment.py - 市场状态判断实现
+- scripts/signal_generator.py - 信号生成实现
