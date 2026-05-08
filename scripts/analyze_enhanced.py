@@ -10,6 +10,8 @@
 
 import os
 import sys
+import time
+import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -52,6 +54,59 @@ TIMEFRAME_1M_REQUIREMENTS = {
 
 # 初始化 CSV 存储
 csv_storage = CsvStorage(str(DATA_PATH))
+
+# 代理配置
+PROXY = os.getenv('HTTP_PROXY', 'http://192.168.1.201:10809')
+
+
+def _get_realtime_prices(symbols: list) -> dict:
+    """
+    从 Binance API 获取多个交易对的最新实时价格。
+
+    Returns:
+        dict: {symbol: {'price': float, 'change_pct': float}}
+              失败的币种不在结果中。
+    """
+    result = {}
+    proxies = {"http": PROXY, "https": PROXY}
+
+    # 批量获取 24h ticker
+    try:
+        resp = requests.get(
+            "https://api.binance.com/api/v3/ticker/24hr",
+            timeout=10,
+            proxies=proxies,
+        )
+        if resp.status_code == 200:
+            for item in resp.json():
+                sym = item.get("symbol")
+                if sym in symbols:
+                    result[sym] = {
+                        "price": float(item["lastPrice"]),
+                        "change_pct": float(item["priceChangePercent"]),
+                    }
+    except Exception as e:
+        print(f"  ⚠ 批量获取实时价格失败（降级使用 K 线收盘价）：{e}")
+
+    # 补充未获取到的（单个请求）
+    for sym in symbols:
+        if sym in result:
+            continue
+        try:
+            resp = requests.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": sym},
+                timeout=5,
+                proxies=proxies,
+            )
+            if resp.status_code == 200:
+                result[sym] = {"price": float(resp.json()["price"]), "change_pct": None}
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+    return result
+
 
 # 技术指标参数
 RSI_PERIOD = int(os.getenv('RSI_PERIOD', '14'))
@@ -162,8 +217,8 @@ def analyze_symbol(symbol, timeframe):
         # 确保 timestamp 是 datetime 类型
         df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-        # 检查数据是否足够
-        min_bars = BB_PERIOD + 10
+        # 检查数据是否足够（至少需要 BB_PERIOD 条才能计算布林带）
+        min_bars = BB_PERIOD
         if len(df) < min_bars:
             print(f"  {symbol} 数据不足（需要{min_bars}条，实际{len(df)}条），跳过")
             return None
@@ -229,6 +284,7 @@ def analyze_symbol(symbol, timeframe):
             'bb_position': bb_position,
             'atr': round(atr_value, 2) if atr_value else None,
             'volatility': round(volatility_pct, 2),
+            # close 和 change_pct 将在 generate_report 中被实时价格覆盖
             'close': round(latest['close'], 2),
             'change_pct': round((latest['close'] - prev['close']) / prev['close'] * 100, 2)
         }
@@ -287,6 +343,10 @@ def ensure_data_exists(symbol: str, timeframe: str, auto_sync: bool = True) -> b
                 # Continue with available data, don't return False
 
             # 批量 resample
+            # pandas 3.0 兼容: m → min
+            TF_FREQ_MAP = {'15m': '15min', '1h': '1h', '4h': '4h', '1d': '1D'}
+            freq = TF_FREQ_MAP.get(timeframe, timeframe)
+
             ohlc_dict = {
                 'open': 'first',
                 'high': 'max',
@@ -294,7 +354,7 @@ def ensure_data_exists(symbol: str, timeframe: str, auto_sync: bool = True) -> b
                 'close': 'last',
                 'volume': 'sum'
             }
-            df_resampled = df_1m_full.resample(timeframe, closed='left', label='left').agg(ohlc_dict).dropna()
+            df_resampled = df_1m_full.resample(freq, closed='left', label='left').agg(ohlc_dict).dropna()
 
             if len(df_resampled) == 0:
                 print("重采样失败（无完整周期）")
@@ -385,6 +445,16 @@ def generate_report(timeframe, symbol_filter=None, batch_symbols=None):
             print(f"完成")
         else:
             print(f"跳过")
+
+    # 获取实时价格，覆盖 K 线收盘价
+    if results:
+        print(f"  获取实时价格...")
+        real_prices = _get_realtime_prices([r['symbol'] for r in results])
+        for r in results:
+            if r['symbol'] in real_prices:
+                r['close'] = real_prices[r['symbol']]['price']
+                if real_prices[r['symbol']]['change_pct'] is not None:
+                    r['change_pct'] = real_prices[r['symbol']]['change_pct']
 
     if not results:
         print("  没有可用的分析结果")
