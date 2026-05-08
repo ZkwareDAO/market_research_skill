@@ -34,6 +34,7 @@ python scripts/scheduler.py
 5. **数据源配置** - 支持 local (本地文件) 或 Binance API
 6. **自动告警** - 数据缺失时发送企业微信告警 (local 源)
 7. **每日文件分割** - 数据按日期分割存储，便于管理和回溯
+8. **Deribit 期权快照** - BTC/ETH ATM 期权价格/IV 及 25-Delta IV（本周五、下周五、月底到期）
 
 ## 数据源配置
 
@@ -163,7 +164,8 @@ market_research_skill/
 ├── output/
 │   ├── 1h_analysis/        # 1 小时分析报告
 │   ├── 4h_analysis/        # 4 小时分析报告
-│   └── 1d_analysis/        # 日线分析报告
+│   ├── 1d_analysis/        # 日线分析报告
+│   └── options_snapshot/   # Deribit 期权快照报告
 ├── logs/                   # 日志目录
 ├── scripts/
 │   ├── sync_data.py        # 数据同步
@@ -173,7 +175,8 @@ market_research_skill/
 │   ├── data_resampler.py   # 数据重采样
 │   ├── indicator_calculator.py  # 指标计算
 │   ├── market_judgment.py  # 市场状态判断
-│   └── signal_generator.py # 信号生成
+│   ├── signal_generator.py # 信号生成
+│   └── deribit_options.py  # Deribit 期权快照
 ├── .env.sample             # 环境变量模板
 └── requirements.txt        # Python 依赖
 ```
@@ -276,6 +279,12 @@ python scripts/scheduler.py 1h   # 指定 1h 分析
 python scripts/scheduler.py sync # 仅同步数据
 ```
 
+### Deribit 期权快照
+
+```bash
+python scripts/deribit_options.py  # 获取 BTC/ETH ATM 期权及 25-Delta IV
+```
+
 ## 配置说明
 
 ### 环境变量
@@ -314,6 +323,10 @@ MACD_SIGNAL=9
 BB_PERIOD=20
 BB_STD=2
 ATR_PERIOD=14
+
+# Deribit 期权快照配置
+DERIBIT_API_BASE=https://www.deribit.com/api/v2
+HTTPS_PROXY=http://192.168.1.201:10809
 ```
 
 ## 模块化组件
@@ -333,6 +346,60 @@ CSV 存储管理，支持按日期分割的文件读写。
 ### SignalGenerator
 信号生成，合并所有周期的指标到一行，生成最终的信号 DF。
 
+## Deribit 期权快照
+
+从 Deribit 交易所获取 BTC/ETH 期权市场数据，生成期权快照报告。
+
+### 功能
+
+1. **ATM 期权价格与 IV** — 获取行权价最接近现货价格的期权的 mark_price 和 mark_iv
+2. **25-Delta Call/Put IV** — 获取 delta 最接近 ±0.25 的期权的 mark_iv，并计算 Risk Reversal
+3. **三个到期日** — 本周五、下周五、当月月底（Deribit 期权在到期日 08:00 UTC 结算）
+
+### 数据源
+
+- **API**：Deribit 公开 API（`https://www.deribit.com/api/v2`），无需认证
+- **代理**：通过 `HTTPS_PROXY` 环境变量配置 HTTP 代理
+
+### API 调用流程
+
+1. `GET /public/get_instruments` — 获取所有活跃期权合约，按 `expiration_timestamp` 过滤目标到期日
+2. `GET /public/get_book_summary_by_currency` — 批量获取所有期权的 `mark_iv`、`mark_price`、`underlying_price`，用于确定 ATM 行权价
+3. `GET /public/ticker` — 逐个获取目标到期日合约的 `greeks.delta`，找到 delta 最接近 0.25（call）和 -0.25（put）的期权
+
+### 到期日匹配规则
+
+- 本周五：当前周的周五；若当天为周五且已过 08:00 UTC，则取下周五
+- 下周五：本周五的下一个周五
+- 月底：当月最后一天
+- 若目标日期在 Deribit 无对应到期合约，自动匹配 ±3 天内最近的可用到期日
+
+### 执行命令
+
+```bash
+python scripts/deribit_options.py
+```
+
+### 输出
+
+- 终端打印完整报告
+- 保存 Markdown 文件到 `output/options_snapshot/snapshot_{YYYY-MM-DD_HH-MM}.md`
+
+### 报告内容
+
+| 报告区域 | 包含字段 |
+|----------|---------|
+| ATM 期权（按币种分表） | 到期日、行权价、Call 价格、Put 价格、Call IV、Put IV |
+| 25-Delta IV（按币种分表） | 到期日、25D Call IV、25D Call Strike、25D Put IV、25D Put Strike、Risk Reversal (Call IV − Put IV) |
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DERIBIT_API_BASE` | `https://www.deribit.com/api/v2` | Deribit API 地址 |
+| `HTTPS_PROXY` | （空） | HTTP/HTTPS 代理地址，如 `http://192.168.1.201:10809` |
+| `OUTPUT_PATH` | `./output` | 报告输出目录（与技术分析报告共用） |
+
 ## 注意事项
 
 1. **数据源选择** - local 数据源需要确保外部数据同步工具正常运行
@@ -349,3 +416,5 @@ CSV 存储管理，支持按日期分割的文件读写。
 - scripts/indicator_calculator.py - 指标计算实现
 - scripts/market_judgment.py - 市场状态判断实现
 - scripts/signal_generator.py - 信号生成实现
+- scripts/deribit_options.py - Deribit 期权快照实现
+- [Deribit API v2 文档](https://docs.deribit.com/) - 期权公开 API 参考
