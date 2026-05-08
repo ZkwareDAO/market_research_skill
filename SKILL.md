@@ -37,34 +37,36 @@ python scripts/scheduler.py
 
 ## 数据源配置
 
-### 方式一：local 数据源
+### 方式一：local 数据源（推荐）
 
-使用本地目录数据文件，数据由外部同步工具提供。
+使用 `scripts/sync_remote_data.sh` 从远程服务器 rsync 数据。
 
 **环境变量配置：**
 ```bash
 DATA_SOURCE=local
-MARKET_RESEARCHER_DATA_PATH=D:/workspace/shared_data/binance/futures/um/daily/data
+MARKET_RESEARCHER_DATA_PATH=/home/zkware/workspace/shared_data
 WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 ```
 
-**数据存储格式：**
+**远程同步脚本：**
+```bash
+# 手动执行远程同步
+bash scripts/sync_remote_data.sh
+
+# 或从 Python 自动调用（DATA_SOURCE=local 时自动执行）
+python scripts/sync_data.py
 ```
-{data_path}/
-├── BTCUSDT/
-│   ├── 1h/
-│   │   ├── BTCUSDT-1h-2026-04-21.csv
-│   │   └── BTCUSDT-1h-2026-04-22.csv
-│   ├── 4h/
-│   │   └── BTCUSDT-4h-2026-04-21.csv
-│   └── 1d/
-│       └── BTCUSDT-1d-2026-04-21.csv
-├── ETHUSDT/
-│   └── ...
+
+**远程服务器配置（在 sync_remote_data.sh 中修改）：**
+```bash
+REMOTE_USER="zkware"
+REMOTE_HOST="192.168.1.10"
+REMOTE_PATH="~/workspace/go_projects/trading_crypto_bot/data"
+LOCAL_PATH="/home/zkware/workspace/shared_data"
 ```
 
 **特点：**
-- 数据按日期分割存储：`{symbol}-{timeframe}-{YYYY}-{MM}-{DD}.csv`
+- 数据按日期分割存储：`{data_path}/{symbol}/{timeframe}/{symbol}-{timeframe}-{YYYY}-{MM}-{DD}.csv`
 - 数据缺失时发送告警，不自动补充
 - 适合与外部数据同步工具配合使用
 

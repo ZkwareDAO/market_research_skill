@@ -20,8 +20,8 @@ cp .env.sample .env
 
 **最小配置：**
 ```bash
-DATA_SOURCE=binance  # 或 local
-MARKET_RESEARCHER_DATA_PATH=D:/workspace/shared_data/binance/futures/um/daily/data
+DATA_SOURCE=local  # 或 binance
+MARKET_RESEARCHER_DATA_PATH=/home/zkware/workspace/shared_data
 ```
 
 ### 3. 运行

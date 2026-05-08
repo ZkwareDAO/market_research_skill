@@ -74,7 +74,7 @@ timestamp,open,high,low,close,volume
 ### 2. 数据同步 (sync_data.py)
 
 **功能：**
-- 从 Binance API 或 local 文件同步 OHLCV 数据
+- 从 Binance API 或 remote rsync 同步 OHLCV 数据
 - 支持增量同步（只获取新数据）
 - 数据缺失告警（local 模式）
 - 自动补充数据（Binance 模式）
@@ -83,6 +83,7 @@ timestamp,open,high,low,close,volume
 ```python
 fetch_binance_klines(symbol, interval, start_time, end_time)  # 获取 K 线
 sync_symbol_binance(symbol, timeframe)  # Binance 源同步
+run_remote_sync()                       # 远程 rsync 同步
 sync_symbol_local(symbol, timeframe)    # local 源检查
 send_wecom_alert(message)               # 发送告警
 ```
@@ -91,6 +92,7 @@ send_wecom_alert(message)               # 发送告警
 
 | 特性 | local 源 | Binance 源 |
 |------|----------|------------|
+| 数据来源 | rsync 远程服务器 | Binance API |
 | 数据补充 | 告警 | 自动补充 |
 | API 依赖 | 无 | 需要网络 |
 | 适用场景 | 已有数据管道 | 独立运行 |

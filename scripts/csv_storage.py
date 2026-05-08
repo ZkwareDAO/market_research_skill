@@ -44,8 +44,8 @@ class CsvStorage:
         if timestamp is None:
             return datetime.now().strftime('%Y-%m-%d')
 
-        # 处理毫秒时间戳（整数）
-        if isinstance(timestamp, (int, float)):
+        # 处理毫秒时间戳（整数，含 numpy 整数）
+        if isinstance(timestamp, (int, float)) or (hasattr(timestamp, 'dtype') and str(timestamp.dtype).startswith('int')):
             # 毫秒转纳秒
             return pd.Timestamp(timestamp * 10**6).strftime('%Y-%m-%d')
 
@@ -102,7 +102,20 @@ class CsvStorage:
             try:
                 # 检查文件是否存在
                 if file_path.exists():
-                    existing = pd.read_csv(file_path)
+                    # header 检测
+                    with open(file_path) as fp:
+                        first_line = fp.readline().strip()
+                    has_header = first_line == 'timestamp,open,high,low,close,volume' or \
+                                 first_line.startswith('timestamp,')
+
+                    if has_header:
+                        existing = pd.read_csv(file_path)
+                    else:
+                        csv_columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                       'close_time', 'quote_volume', 'trades', 'taker_buy_volume',
+                                       'taker_quote_volume', 'ignore']
+                        existing = pd.read_csv(file_path, names=csv_columns)
+
                     if not existing.empty:
                         # 检查最后一条数据是否相同
                         last_ts = existing['timestamp'].iloc[-1]
@@ -113,7 +126,7 @@ class CsvStorage:
                         combined = pd.concat([existing, new_df]).drop_duplicates(
                             subset=['timestamp'], keep='last'
                         )
-                        combined.to_csv(file_path, index=False)
+                        combined.drop(columns=['date']).to_csv(file_path, index=False)
                     else:
                         date_df.drop(columns=['date']).to_csv(file_path, index=False)
                 else:
@@ -223,10 +236,15 @@ class CsvStorage:
             try:
                 if isinstance(ts, str):
                     # 日期字符串格式：2023-07-28 或 2026-04-11 00:00:00
-                    return pd.to_datetime(ts)
-                elif isinstance(ts, (int, float)):
-                    # 毫秒时间戳
-                    return pd.to_datetime(ts, unit='ms')
+                    return pd.to_datetime(ts, utc=True)
+                elif isinstance(ts, (int, float)) or (hasattr(ts, 'dtype') and str(ts.dtype).startswith('int')):
+                    # 毫秒时间戳 → tz-aware UTC
+                    return pd.to_datetime(ts, unit='ms', utc=True)
+                elif hasattr(ts, 'tzinfo'):
+                    # 已有时区信息，确保是 UTC
+                    if ts.tzinfo is None:
+                        return ts.tz_localize('UTC')
+                    return ts
                 else:
                     return ts
             except Exception:

@@ -145,6 +145,23 @@ class DataResampler:
 
         return updated
 
+    def _save_df_to_storage(self, symbol: str, timeframe: str, df: pd.DataFrame):
+        """直接保存指定的 DF 到 CSV（用于批量重采样后的增量写入）"""
+        if self.csv_storage is None or df.empty:
+            return
+
+        # datetime 索引 → timestamp 列
+        save_df = df.reset_index()
+        dtype_str = str(save_df['timestamp'].dtype)
+        if 'ns' in dtype_str:
+            save_df['timestamp'] = save_df['timestamp'].astype('int64') // 10**6
+        elif 'us' in dtype_str:
+            save_df['timestamp'] = save_df['timestamp'].astype('int64') // 1000
+        else:
+            save_df['timestamp'] = save_df['timestamp'].astype('int64')
+
+        self.csv_storage.append(symbol, timeframe, save_df)
+
     def _save_to_storage(self, symbol: str, timeframe: str):
         """保存指定周期数据到 CSV 存储"""
         if self.csv_storage is None:
@@ -331,6 +348,71 @@ class DataResampler:
         logger.debug(
             f"{symbol} {target_timeframe} resample 完成，共 {len(self._dfs[symbol][target_timeframe])} 条"
         )
+
+    def resample_all_pending(self, symbol: str, timeframes: Optional[List[str]] = None):
+        """
+        批量重采样所有已完整的周期
+
+        从已有的 1m DF 中一次性 resample 到所有目标周期（5m/15m/1h/4h/1d）。
+        使用 append 写入，已有 timestamp 自动跳过。
+
+        Args:
+            symbol: 交易对
+            timeframes: 目标周期列表，默认跳过 1m
+        """
+        df_1m = self._dfs[symbol].get("1m", pd.DataFrame())
+        if df_1m.empty:
+            logger.debug(f"{symbol} 1m 数据为空，跳过重采样")
+            return
+
+        # OHLCV 聚合规则
+        ohlc_dict = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+
+        # pandas 3.0 兼容：m → min, d → D
+        TF_FREQ_MAP = {
+            "5m": "5min",
+            "15m": "15min",
+            "1h": "1h",
+            "4h": "4h",
+            "1d": "1D",
+        }
+
+        target_tfs = timeframes or [tf for tf in self.timeframes if tf != "1m"]
+
+        for tf in target_tfs:
+            if tf not in self.TIMEFRAME_MINUTES:
+                continue
+
+            freq = TF_FREQ_MAP.get(tf, f"{self.TIMEFRAME_MINUTES[tf]}min")
+
+            # 一次性 resample 所有 1m 数据
+            resampled = df_1m.resample(freq, closed="left", label="left").agg(ohlc_dict)
+            resampled = resampled.dropna(subset=["open"])
+
+            if resampled.empty:
+                logger.debug(f"{symbol} {tf} resample 无有效数据")
+                continue
+
+            # 只保存新数据（不 concat 已有 DF，避免索引混乱）
+            existing = self._dfs[symbol].get(tf, pd.DataFrame())
+            if not existing.empty:
+                new_only = resampled[~resampled.index.isin(existing.index)]
+                if new_only.empty:
+                    logger.debug(f"{symbol} {tf} 无新增数据，跳过")
+                    continue
+                # 直接追加新数据到存储，不污染内存 DF
+                self._save_df_to_storage(symbol, tf, new_only)
+            else:
+                self._dfs[symbol][tf] = resampled
+                self._save_to_storage(symbol, tf)
+
+            logger.info(f"{symbol} {tf} 重采样完成，共 {len(self._dfs[symbol][tf])} 条")
 
     def get_latest_kline(self, symbol: str, timeframe: str) -> Optional[dict]:
         """获取最新一根 K 线数据"""

@@ -12,6 +12,7 @@
 import os
 import sys
 import time
+import subprocess
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
@@ -151,8 +152,50 @@ def sync_symbol_binance(symbol, timeframe):
     print(f"保存 {len(df)} 条记录")
 
 
-def sync_symbol_local(symbol, timeframe):
-    """同步单个交易对的数据（local 源）"""
+def run_remote_sync():
+    """调用远程数据同步脚本（rsync）"""
+    script_path = Path(__file__).parent / 'sync_remote_data.sh'
+    if not script_path.exists():
+        print(f"远程同步脚本不存在：{script_path}")
+        return False
+
+    print(f"  运行远程数据同步...")
+    try:
+        result = subprocess.run(
+            ['bash', str(script_path)],
+            cwd=str(Path(__file__).parent),
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            print("  远程同步成功")
+            return True
+        else:
+            print(f"  远程同步失败：{result.stderr.strip()}")
+            return False
+    except subprocess.TimeoutExpired:
+        print("  远程同步超时（120s）")
+        return False
+    except Exception as e:
+        print(f"  远程同步异常：{e}")
+        return False
+
+
+def sync_symbol_local(symbol, timeframe, skip_remote_sync=False):
+    """同步单个交易对的数据（local 源）
+    
+    Args:
+        symbol: 交易对
+        timeframe: 时间周期
+        skip_remote_sync: 是否跳过远程同步（避免重复调用）
+    """
+    # 首次调用时执行远程同步
+    if not skip_remote_sync:
+        if not run_remote_sync():
+            print(f"  {symbol} {timeframe} 远程同步失败")
+            return False
+
     # 检查数据是否存在
     df = csv_storage.load_recent(symbol, timeframe, limit=1)
 
@@ -163,9 +206,9 @@ def sync_symbol_local(symbol, timeframe):
 - 交易对：{symbol}
 - 时间周期：{timeframe}
 - 缺失时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
-- 数据源：local
+- 数据源：local (远程同步后仍无数据)
 
-请检查数据是否已同步到 {DATA_PATH}。"""
+请检查远程服务器数据是否已更新。"""
         send_wecom_alert(message)
         return False
 
@@ -193,13 +236,23 @@ def sync_all_symbols(symbols=None):
     timeframe = '1m'
     print(f"\n=== 同步 {timeframe} 数据 ===")
 
+    # local 数据源：先执行一次远程同步
+    if DATA_SOURCE == 'local':
+        print("\n[远程同步] 开始从远程服务器同步数据...")
+        remote_sync_ok = run_remote_sync()
+        if not remote_sync_ok:
+            print("[远程同步] 失败，跳过后续检查")
+            print("\n数据同步完成")
+            return False
+
     for i, symbol in enumerate(symbols, 1):
         try:
             print(f"[{i}/{len(symbols)}] {symbol}...", end=' ')
             if DATA_SOURCE == 'binance':
                 sync_symbol_binance(symbol, timeframe)
             else:
-                sync_symbol_local(symbol, timeframe)
+                # 远程同步已在上面执行，这里跳过
+                sync_symbol_local(symbol, timeframe, skip_remote_sync=True)
 
             # 避免 API 限流
             if DATA_SOURCE == 'binance':
@@ -208,10 +261,11 @@ def sync_all_symbols(symbols=None):
             print(f"失败：{e}")
 
     print("\n数据同步完成")
+    return True
 
 
 def sync_single_symbol(symbol: str):
-    """Sync 1m data for a single symbol from Binance
+    """Sync 1m data for a single symbol
 
     Args:
         symbol: Trading pair symbol (e.g., 'BTCUSDT')
@@ -225,9 +279,31 @@ def sync_single_symbol(symbol: str):
     if DATA_SOURCE == 'binance':
         sync_symbol_binance(symbol, timeframe)
     else:
-        sync_symbol_local(symbol, timeframe)
+        # local 源：先执行远程同步
+        print("[远程同步] 开始从远程服务器同步数据...")
+        if not run_remote_sync():
+            print("[远程同步] 失败")
+            return
+        sync_symbol_local(symbol, timeframe, skip_remote_sync=True)
 
     print("\n数据同步完成")
+
+
+def _resample_symbols(symbols: list):
+    """Sync 完成后，对指定币种执行重采样"""
+    print(f"\n=== 开始重采样到多周期 ===")
+    from data_resampler import DataResampler
+
+    resampler = DataResampler(symbols, csv_storage)
+    for sym in symbols:
+        print(f"  [{sym}] 加载 1m 数据并 resample...", end=' ')
+        ok = resampler.load_from_storage(sym, '1m', limit=3000)  # 约 2 天
+        if not ok:
+            print("无 1m 数据，跳过")
+            continue
+        resampler.resample_all_pending(sym)
+        print("完成")
+    print("重采样完成")
 
 
 def main():
@@ -243,6 +319,8 @@ def main():
     if len(sys.argv) > 1:
         symbol = sys.argv[1]
         sync_single_symbol(symbol)
+        # sync 完成后执行重采样
+        _resample_symbols([symbol])
         return
 
     # Check for environment variable (called from analyze.py)
@@ -252,6 +330,9 @@ def main():
         sync_all_symbols(symbols=symbols)
     else:
         sync_all_symbols()
+
+    # sync 完成后执行重采样
+    _resample_symbols(TOP_SYMBOLS)
 
 
 if __name__ == '__main__':
