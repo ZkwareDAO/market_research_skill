@@ -11,6 +11,7 @@ market_researcher（市场观察员）是一个加密货币市场技术分析 Ag
 5. **双数据源支持** - local 文件或 Binance API
 6. **定时任务调度** - 自动执行数据同步和分析报告
 7. **每日文件分割** - 数据按日期分割存储：{symbol}-{timeframe}-{YYYY}-{MM}-{DD}.csv
+8. **Deribit 期权快照** - BTC/ETH ATM 期权价格/IV 及 25-Delta Call/Put IV
 
 ## 文件结构
 
@@ -23,13 +24,18 @@ market_research_skill/
 ├── .env.sample                 # 环境变量模板
 ├── scripts/
 │   ├── sync_data.py            # 数据同步脚本
-│   ├── analyze.py              # 技术分析脚本
+│   ├── analyze.py              # 技术分析脚本（旧版）
+│   ├── analyze_enhanced.py     # 技术分析脚本（增强版）
 │   ├── scheduler.py            # 定时调度脚本
 │   ├── csv_storage.py          # CSV 存储管理
 │   ├── data_resampler.py       # 数据重采样
 │   ├── indicator_calculator.py # 指标计算
 │   ├── market_judgment.py      # 市场状态判断
-│   └── signal_generator.py     # 信号生成
+│   ├── signal_generator.py     # 信号生成
+│   ├── deribit_options.py      # Deribit 期权快照
+│   ├── run_options_snapshot.sh # 期权快照 shell 包装（crontab 用）
+│   ├── sync_remote_data.sh     # 远程 rsync 数据同步
+│   └── cron-sync.sh            # 数据同步 crontab 入口
 ├── data/                       # 市场数据目录（或配置的外部路径）
 │   └── {symbol}/
 │       ├── {timeframe}/
@@ -37,9 +43,12 @@ market_research_skill/
 │       │   └── ...
 │       └── ...
 ├── output/                     # 分析报告输出
-│   ├── 1h_analysis/
-│   ├── 4h_analysis/
-│   └── 1d_analysis/
+│   ├── {symbol}/
+│   │   └── {timeframe}_analysis/
+│   ├── all/
+│   │   └── {timeframe}_analysis/
+│   └── options_snapshot/       # 期权快照报告
+│       └── snapshot_{YYYY-MM-DD_HH-MM}.md
 └── logs/                       # 日志目录
 ```
 
@@ -227,6 +236,96 @@ class MarketJudgment:
 - 市场状态：market_type, direction, confidence
 ```
 
+### 6. Deribit 期权快照 (deribit_options.py)
+
+**功能：**
+- 查询 Deribit 公开 API，获取 BTC/ETH 期权数据
+- 输出 ATM 期权价格和隐含波动率（IV）
+- 输出 25-Delta Call/Put 的 IV 和行权价
+- 自动保存 Markdown 报告到 `output/options_snapshot/`
+
+**数据类：**
+```python
+@dataclass(frozen=True)
+class TargetExpiry:
+    label: str          # "本周五" / "下周五" / "月底"
+    date_str: str       # "05-09"
+    timestamp_ms: int   # Deribit expiration_timestamp (ms)
+
+@dataclass(frozen=True)
+class ATMData:
+    currency: str
+    expiry: TargetExpiry
+    strike: float
+    call_price: Optional[float]   # mark_price (BTC 计价)
+    put_price: Optional[float]
+    call_iv: Optional[float]      # mark_iv (%)
+    put_iv: Optional[float]
+    underlying_price: float
+
+@dataclass(frozen=True)
+class Delta25Data:
+    currency: str
+    expiry: TargetExpiry
+    call_iv: Optional[float]      # 25-Delta Call IV (%)
+    call_strike: Optional[float]
+    call_delta: Optional[float]
+    put_iv: Optional[float]       # 25-Delta Put IV (%)
+    put_strike: Optional[float]
+    put_delta: Optional[float]
+```
+
+**API 客户端：**
+```python
+class DeribitClient:
+    get_instruments(currency)       # 获取所有活跃期权合约
+    get_book_summary(currency)      # 批量获取 mark_iv、mark_price、underlying_price
+    get_ticker(instrument_name)     # 获取单个合约的 greeks.delta
+```
+
+**API 调用流程：**
+1. `GET /public/get_instruments` — 获取所有活跃期权合约列表
+2. `GET /public/get_book_summary_by_currency` — 批量获取摘要，确定 ATM 行权价
+3. `GET /public/ticker` — 逐个获取 delta，找到最接近 ±0.25 的期权
+
+**到期日计算逻辑：**
+- 本周五：当前周的周五；若当天为周五且已过 08:00 UTC，则取下周五
+- 下周五：本周五的下一个周五
+- 月底：当月最后一天
+- 若 Deribit 无对应到期合约，自动匹配 ±3 天内最近的可用到期日
+
+**报告输出：**
+- 保存路径：`output/options_snapshot/snapshot_{YYYY-MM-DD_HH-MM}.md`
+- 内容：ATM 期权表 + 25-Delta IV 表 + 关键观察分析
+- Risk Reversal = 25D Call IV − 25D Put IV（反映市场偏斜）
+
+**分析总结函数：**
+```python
+_generate_analysis_summary(atm_results, delta_results) -> list[str]
+```
+
+自动从数据中提取以下维度的关键观察：
+
+| 维度 | 数据来源 | 判断逻辑 |
+|------|---------|---------|
+| BTC vs ETH IV 水平 | ATM avg(Call IV, Put IV) | 差值 >5% 为"显著"，0~5% 为"略高" |
+| ATM Put/Call 偏斜 | ATM Put IV − Call IV | >0.5% 偏看空保护，<-0.5% 偏看多 |
+| 25-Delta Risk Reversal | 25D Call IV − Put IV | 全负偏看空，全正偏看多，混合为方向不一致 |
+| 期限结构 | 近端 vs 远端 ATM IV | 差值 >1% contango，<-1% backwardation |
+| 隐含方向 | 近端 ATM Call/Put 价格比 | >1.05x Call 溢价偏多，<0.95x Put 溢价偏空 |
+
+**Shell 包装脚本 (run_options_snapshot.sh)：**
+```bash
+#!/bin/bash
+cd "$(dirname "$0")" && python3 deribit_options.py >> ../logs/options_snapshot.log 2>&1
+```
+
+**Crontab 配置示例：**
+```bash
+# 每天 8:00 UTC 生成期权快照
+0 8 * * * cd /path/to/market_research_skill && bash scripts/run_options_snapshot.sh
+```
+
 ## 配置说明
 
 ### 环境变量
@@ -245,6 +344,8 @@ class MarketJudgment:
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2 | 布林带标准差 |
 | `ATR_PERIOD` | 14 | ATR 周期 |
+| `DERIBIT_API_BASE` | https://www.deribit.com/api/v2 | Deribit API 地址 |
+| `HTTPS_PROXY` | （空） | HTTP/HTTPS 代理地址 |
 
 ### 定时任务配置
 
@@ -266,6 +367,9 @@ class MarketJudgment:
 
 # 1d 分析
 0 0 * * * python scripts/analyze.py 1d
+
+# 期权快照（每天 8:00 UTC）
+0 8 * * * bash scripts/run_options_snapshot.sh
 ```
 
 ## 输出示例
@@ -312,6 +416,36 @@ class MarketJudgment:
 请检查数据是否已同步到指定目录。
 ```
 
+### 期权快照报告结构
+
+```markdown
+# Deribit 期权快照 (2026-05-09 08:00 UTC)
+
+## ATM 期权 — BTC (现货: $103,000)
+
+| 到期日 | 行权价 | Call 价格 | Put 价格 | Call IV | Put IV |
+|--------|--------|-----------|----------|---------|--------|
+| 05-09 (本周五) | 103,000 | 0.0150 | 0.0148 | 45.2% | 44.8% |
+| 05-16 (下周五) | 103,000 | 0.0320 | 0.0315 | 48.1% | 47.5% |
+| 05-29 (月底(实际05-29)) | 103,000 | 0.0480 | 0.0475 | 50.3% | 49.8% |
+
+## 25-Delta IV
+
+### BTC
+
+| 到期日 | 25D Call IV | 25D Call Strike | 25D Put IV | 25D Put Strike | Risk Reversal |
+|--------|------------|-----------------|------------|----------------|---------------|
+| 05-09 (本周五) | 46.5% | 106,000 | 43.2% | 100,000 | +3.3% |
+
+## 关键观察
+
+- ETH IV 显著高于 BTC（+10%~14%），隐含波动率溢价明显
+- BTC 25-Delta Risk Reversal 全为负值（-3.5%~-1.3%），偏看空
+- BTC 期限结构为 contango（近端 33.5% → 远端 35.4%），预期远期波动升高
+- ETH 期限结构为 contango（近端 43.6% → 远端 49.6%），预期远期波动升高
+- BTC 近端 ATM Call 溢价于 Put（1.12x），隐含方向偏多
+```
+
 ## 测试验证
 
 ### 已通过测试
@@ -339,6 +473,7 @@ class MarketJudgment:
 ⏳ local 数据源集成
 ⏳ 企业微信告警发送
 ⏳ 定时任务长期运行
+⏳ Deribit 期权快照（已手动验证通过，待自动化测试）
 
 ## 依赖项
 
@@ -355,6 +490,8 @@ python-dotenv>=1.0.0  # 环境变量
 2. **Python 版本** - 需要 Python 3.10+，已测试 Python 3.12
 3. **数据源** - local 数据源需要外部同步工具配合
 4. **实时性** - 默认每 15 分钟同步一次，非实时数据
+5. **期权币种** - Deribit 期权快照目前仅支持 BTC 和 ETH
+6. **Deribit 代理** - Deribit API 访问可能需要配置 `HTTPS_PROXY`
 
 ## 后续优化
 
@@ -378,4 +515,5 @@ python-dotenv>=1.0.0  # 环境变量
 
 - [SKILL.md](./SKILL.md) - 完整 Skill 文档
 - [README.md](./README.md) - 快速开始
+- [Deribit API v2 文档](https://docs.deribit.com/) - 期权公开 API 参考
 - soul.md - 市场观察员人格定义
