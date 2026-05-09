@@ -328,6 +328,142 @@ def _fmt_price(price: float | None) -> str:
     return f"{price:.4f}"
 
 
+def _avg_iv(atm: ATMData) -> float | None:
+    if atm.call_iv is not None and atm.put_iv is not None:
+        return (atm.call_iv + atm.put_iv) / 2
+    return atm.call_iv or atm.put_iv
+
+
+def _generate_analysis_summary(
+    atm_results: dict[str, list[ATMData]],
+    delta_results: dict[str, list[Delta25Data]],
+) -> list[str]:
+    """Generate key observations from ATM and 25-Delta data."""
+    bullets: list[str] = []
+
+    # --- 1. BTC vs ETH IV level ---
+    btc_atm = atm_results.get("BTC", [])
+    eth_atm = atm_results.get("ETH", [])
+    if btc_atm and eth_atm:
+        btc_ivs = [_avg_iv(a) for a in btc_atm if _avg_iv(a) is not None]
+        eth_ivs = [_avg_iv(a) for a in eth_atm if _avg_iv(a) is not None]
+        if btc_ivs and eth_ivs:
+            diffs = [e - b for e, b in zip(eth_ivs, btc_ivs)]
+            min_d, max_d = min(diffs), max(diffs)
+            if min_d > 5:
+                bullets.append(
+                    f"ETH IV 显著高于 BTC（+{min_d:.0f}%~{max_d:.0f}%），隐含波动率溢价明显"
+                )
+            elif min_d > 0:
+                bullets.append(f"ETH IV 高于 BTC（+{min_d:.1f}%~{max_d:.1f}%）")
+            elif max_d < -5:
+                bullets.append(
+                    f"BTC IV 显著高于 ETH（+{abs(max_d):.0f}%~{abs(min_d):.0f}%）"
+                )
+            elif max_d < 0:
+                bullets.append(f"BTC IV 高于 ETH（+{abs(max_d):.1f}%~{abs(min_d):.1f}%）")
+            else:
+                bullets.append("BTC 与 ETH IV 水平接近")
+
+    # --- 2. ATM Put/Call skew per currency ---
+    for currency in CURRENCIES:
+        atm_list = atm_results.get(currency, [])
+        skews = []
+        for a in atm_list:
+            if a.put_iv is not None and a.call_iv is not None:
+                skews.append(a.put_iv - a.call_iv)
+        if not skews:
+            continue
+        min_s, max_s = min(skews), max(skews)
+        avg_s = sum(skews) / len(skews)
+        if avg_s > 0.5:
+            bullets.append(
+                f"{currency} Put IV 高于 Call IV（{min_s:+.1f}%~{max_s:+.1f}%），下行保护需求偏强"
+            )
+        elif avg_s < -0.5:
+            bullets.append(
+                f"{currency} Call IV 高于 Put IV（{abs(max_s):.1f}%~{abs(min_s):.1f}%），上行预期偏强"
+            )
+        else:
+            bullets.append(f"{currency} ATM Put/Call IV 基本持平")
+
+    # --- 3. 25-Delta Risk Reversal ---
+    for currency in CURRENCIES:
+        d25_list = delta_results.get(currency, [])
+        rr_vals = []
+        for d in d25_list:
+            if d.call_iv is not None and d.put_iv is not None:
+                rr_vals.append(d.call_iv - d.put_iv)
+        if not rr_vals:
+            continue
+        min_rr, max_rr = min(rr_vals), max(rr_vals)
+        if max_rr < 0:
+            bullets.append(
+                f"{currency} 25-Delta Risk Reversal 全为负值（{min_rr:+.1f}%~{max_rr:+.1f}%），偏看空"
+            )
+        elif min_rr > 0:
+            bullets.append(
+                f"{currency} 25-Delta Risk Reversal 全为正值（+{min_rr:.1f}%~+{max_rr:.1f}%），偏看多"
+            )
+        else:
+            bullets.append(
+                f"{currency} 25-Delta Risk Reversal 近端与远端方向不一致（{min_rr:+.1f}%~{max_rr:+.1f}%）"
+            )
+
+    # --- 4. Term structure (contango / backwardation) ---
+    for currency in CURRENCIES:
+        atm_list = atm_results.get(currency, [])
+        iv_by_expiry = []
+        for a in atm_list:
+            avg = _avg_iv(a)
+            if avg is not None:
+                iv_by_expiry.append((a.expiry.timestamp_ms, avg, a.expiry.label))
+        if len(iv_by_expiry) < 2:
+            continue
+        iv_by_expiry.sort(key=lambda x: x[0])
+        near_iv = iv_by_expiry[0][1]
+        far_iv = iv_by_expiry[-1][1]
+        diff = far_iv - near_iv
+        if diff > 1.0:
+            bullets.append(
+                f"{currency} 期限结构为 contango（近端 {near_iv:.1f}% → 远端 {far_iv:.1f}%），预期远期波动升高"
+            )
+        elif diff < -1.0:
+            bullets.append(
+                f"{currency} 期限结构为 backwardation（近端 {near_iv:.1f}% → 远端 {far_iv:.1f}%），近期事件风险溢价"
+            )
+        else:
+            bullets.append(
+                f"{currency} 期限结构平坦（近端 {near_iv:.1f}% ≈ 远端 {far_iv:.1f}%）"
+            )
+
+    # --- 5. Implied direction from ATM put-call price ---
+    for currency in CURRENCIES:
+        atm_list = atm_results.get(currency, [])
+        if not atm_list:
+            continue
+        front = atm_list[0]
+        if front.call_price is not None and front.put_price is not None:
+            ratio = front.call_price / front.put_price if front.put_price > 0 else 1.0
+            if ratio > 1.05:
+                bullets.append(
+                    f"{currency} 近端 ATM Call 溢价于 Put（{ratio:.2f}x），隐含方向偏多"
+                )
+            elif ratio < 0.95:
+                bullets.append(
+                    f"{currency} 近端 ATM Put 溢价于 Call（{1/ratio:.2f}x），隐含方向偏空"
+                )
+
+    if not bullets:
+        return []
+
+    lines = ["## 关键观察", ""]
+    for b in bullets:
+        lines.append(f"- {b}")
+    lines.append("")
+    return lines
+
+
 def generate_report(
     atm_results: dict[str, list[ATMData]],
     delta_results: dict[str, list[Delta25Data]],
@@ -397,6 +533,11 @@ def generate_report(
                 f"| {rr} |"
             )
         lines.append("")
+
+    # --- Analysis summary ---
+    summary_lines = _generate_analysis_summary(atm_results, delta_results)
+    if summary_lines:
+        lines.extend(summary_lines)
 
     lines.append(f"---\n*报告生成时间：{now_str}*\n")
     return "\n".join(lines)
