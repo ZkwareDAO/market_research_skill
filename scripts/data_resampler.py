@@ -189,6 +189,35 @@ class DataResampler:
 
         self.csv_storage.append(symbol, timeframe, df)
 
+    def _save_full_to_storage(self, symbol: str, timeframe: str):
+        """
+        全量覆盖写入 CSV（批量重采样专用，替代 append）
+
+        覆盖写入该 symbol/timeframe 下所有日期的文件，
+        确保正确数据能替换旧数据。
+        """
+        if self.csv_storage is None:
+            return
+
+        df = self._dfs[symbol][timeframe].copy()
+        if df.empty:
+            return
+
+        # 重置索引，转换为标准格式
+        df = df.reset_index()
+
+        # timestamp 索引是 datetime，转为毫秒时间戳整数
+        dtype_str = str(df['timestamp'].dtype)
+        if 'ns' in dtype_str:
+            df['timestamp'] = df['timestamp'].astype('int64') // 10**6
+        elif 'us' in dtype_str:
+            df['timestamp'] = df['timestamp'].astype('int64') // 1000
+        else:
+            df['timestamp'] = df['timestamp'].astype('int64')
+
+        # 关键：调用 save_full 覆盖写入，不是 append
+        self.csv_storage.save_full(symbol, timeframe, df)
+
     def _should_resample(self, symbol: str, timeframe: str) -> bool:
         """
         判断是否应该 resample 到目标周期
@@ -399,18 +428,20 @@ class DataResampler:
                 logger.debug(f"{symbol} {tf} resample 无有效数据")
                 continue
 
-            # 只保存新数据（不 concat 已有 DF，避免索引混乱）
-            existing = self._dfs[symbol].get(tf, pd.DataFrame())
-            if not existing.empty:
-                new_only = resampled[~resampled.index.isin(existing.index)]
-                if new_only.empty:
-                    logger.debug(f"{symbol} {tf} 无新增数据，跳过")
-                    continue
-                # 直接追加新数据到存储，不污染内存 DF
-                self._save_df_to_storage(symbol, tf, new_only)
-            else:
-                self._dfs[symbol][tf] = resampled
-                self._save_to_storage(symbol, tf)
+            # 删除最后一个未闭合 bucket（半成品K线）
+            # 例：08:05 UTC 运行时，08:00~12:00 的 4h bucket 只有5分钟数据
+            if len(resampled) <= 1:
+                logger.debug(f"{symbol} {tf} 无完整周期数据，跳过")
+                continue
+            resampled = resampled.iloc[:-1]
+
+            if resampled.empty:
+                logger.debug(f"{symbol} {tf} 无完整周期数据，跳过")
+                continue
+
+            # 全量覆盖写入（替代 append，确保旧数据能被修正）
+            self._dfs[symbol][tf] = resampled
+            self._save_full_to_storage(symbol, tf)
 
             logger.info(f"{symbol} {tf} 重采样完成，共 {len(self._dfs[symbol][tf])} 条")
 

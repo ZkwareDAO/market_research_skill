@@ -364,9 +364,9 @@ def ensure_data_exists(symbol: str, timeframe: str, auto_sync: bool = True) -> b
             if len(df_resampled) > 30:
                 df_resampled = df_resampled.iloc[-30:]
 
-            # 保存到 CSV
+            # 保存到 CSV（覆盖写入，替代 append）
             resampler._dfs[symbol][timeframe] = df_resampled
-            resampler._save_to_storage(symbol, timeframe)
+            resampler._save_full_to_storage(symbol, timeframe)
 
             print(f"完成 (生成 {len(df_resampled)} 条)")
             return True
