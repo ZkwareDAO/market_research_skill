@@ -84,7 +84,7 @@ class DeribitClient:
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         url = f"{self._base}{path}"
-        resp = self._s.get(url, params=params or {})
+        resp = self._s.get(url, params=params or {}, timeout=15)
         resp.raise_for_status()
         body = resp.json()
         if "result" not in body:
